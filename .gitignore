@@ -1,0 +1,7 @@
+﻿/Builds/
+/JuceLibraryCode/
+*.VC.db
+*.ipch
+*.sln
+*.vcxproj
+.vs/
