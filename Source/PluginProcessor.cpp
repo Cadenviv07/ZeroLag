@@ -8,6 +8,8 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <memory>
+#include <juce_dsp/juce_dsp.h>
 
 //==============================================================================
 
@@ -20,7 +22,9 @@ ZeroLagAudioProcessor::ZeroLagAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
+    forwardFFT(std::make_unique<juce::dsp::FFT>(9)), // Note the comma above
+    inverseFFT(std::make_unique<juce::dsp::FFT>(9))
 #endif
 {
 }
@@ -167,6 +171,28 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     }
     //Update writePointer for next function call
     writePointer = (startWritePos + buffer.getNumSamples()) & (fftSize - 1);
+
+    count += buffer.getNumSamples();
+
+   
+    if (count >= shiftSize && count > fftSize) {
+        for (int channel = 0; channel < totalNumInputChannels; ++channel) {
+            int fftPos = writePointer;
+            for (int sample = 0; sample < fftSize * 2; sample += 2) {
+                fftBuffer[sample] = circularBuffer.getSample(channel, fftPos);
+                //Add an imaginary number for every real number sample
+                fftBuffer[sample + 1] = 0.0f;
+                fftPos += 1;
+                fftPos &= (fftSize - 1);
+            }
+            //Finish with FFT data and copy it out to repeat for next channel
+            auto* complexData = reinterpret_cast<juce::dsp::Complex<float>*>(fftBuffer);
+
+            forwardFFT->perform (complexData, complexData, false);
+            inverseFFT->perform(complexData, complexData, true);
+        }
+        count == 0;
+    }
 }
 
 //==============================================================================

@@ -25,10 +25,17 @@ private:
 
     int writePointer = 0;
 
-    //Alignas 32 makes sure that the avx2 can find its location in memory easily and stops at the right spot
-    alignas(32) juce::AudioBuffer<float> circularBuffer;
+    juce::AudioBuffer<float> circularBuffer;
 
     int count = 0;
+
+    //Alignas 32 makes sure that the avx2 can find its location in memory easily and stops at the right spot
+    alignas(32) float fftBuffer[fftSize * 2];
+
+    std::unique_ptr<juce::dsp::FFT> forwardFFT;
+    std::unique_ptr<juce::dsp::FFT> inverseFFT;
+
+
 
 public:
     //==============================================================================
