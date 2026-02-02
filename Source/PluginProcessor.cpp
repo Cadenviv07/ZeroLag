@@ -10,6 +10,7 @@
 #include "PluginEditor.h"
 
 //==============================================================================
+
 ZeroLagAudioProcessor::ZeroLagAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
      : AudioProcessor (BusesProperties()
@@ -95,6 +96,7 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
+    circularBuffer.setSize(getTotalNumInputChannels(), fftSize);
 }
 
 void ZeroLagAudioProcessor::releaseResources()
@@ -150,12 +152,21 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     // the samples and the outer loop is handling the channels.
     // Alternatively, you can process the samples with the channels
     // interleaved by keeping the same state.
+    int startWritePos = writePointer;
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
         auto* channelData = buffer.getWritePointer (channel);
-
+        int currentWritePos = startWritePos;
         // ..do something to the data...
+        // i loops through the 64 samples while currentWritePos loops through the 512 frequencies in the ciruclar buffer
+        for (int i = 0; i < buffer.getNumSamples(); i++) {
+            circularBuffer.setSample(channel, currentWritePos, channelData[i]);
+            currentWritePos++;
+            currentWritePos &= (fftSize - 1);//Bitwise trick to reset it to zero once it reaches 512
+        }
     }
+    //Update writePointer for next function call
+    writePointer = (startWritePos + buffer.getNumSamples()) & (fftSize - 1);
 }
 
 //==============================================================================
