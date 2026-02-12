@@ -10,6 +10,7 @@
 #include "PluginEditor.h"
 #include <memory>
 #include <juce_dsp/juce_dsp.h>
+#include <immintrin.h>
 
 //==============================================================================
 
@@ -101,6 +102,10 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
     circularBuffer.setSize(getTotalNumInputChannels(), fftSize);
+    windowTable.assign(512, 0.0f);
+    for (int n = 0; n < 512; ++n) {
+        windowTable[n] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 511.0f));
+    }
 }
 
 void ZeroLagAudioProcessor::releaseResources()
@@ -189,9 +194,23 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             auto* complexData = reinterpret_cast<juce::dsp::Complex<float>*>(fftBuffer);
 
             forwardFFT->perform (complexData, complexData, false);
+
+            __m256 spectralMask = _mm256_set1_ps(0.5f * (1.0f/512.0f));
+            //AVX2 process eight floats at a time
+            for (int i = 0; i < 1024; i += 4) {
+                // Load 8 floats (4 complex numbers)
+                __m256 temp = _mm256_load_ps(&fftBuffer[i]);
+
+                // Multiply by mask
+                __m256 processed = _mm256_mul_ps(temp, spectralMask);
+
+                // Store back into fftBuffer
+                _mm256_store_ps(&fftBuffer[i], processed);
+            }
+
             inverseFFT->perform(complexData, complexData, true);
         }
-        count == 0;
+        count = 0;
     }
 }
 
