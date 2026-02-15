@@ -32,9 +32,13 @@ private:
     //Alignas 32 makes sure that the avx2 can find its location in memory easily and stops at the right spot
     alignas(32) float fftBuffer[fftSize * 2];
 
+    //Magnitude of the sounds produced
+    alignas(32) float magnitude[512];
+
     std::unique_ptr<juce::dsp::FFT> forwardFFT;
     std::unique_ptr<juce::dsp::FFT> inverseFFT;
 
+    std::vector<float> windowTable;
 
 
 public:

@@ -185,6 +185,7 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             int fftPos = writePointer;
             for (int sample = 0; sample < fftSize * 2; sample += 2) {
                 fftBuffer[sample] = circularBuffer.getSample(channel, fftPos);
+                fftBuffer[sample] *= windowTable[sample/ 2];
                 //Add an imaginary number for every real number sample
                 fftBuffer[sample + 1] = 0.0f;
                 fftPos += 1;
@@ -194,23 +195,77 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             auto* complexData = reinterpret_cast<juce::dsp::Complex<float>*>(fftBuffer);
 
             forwardFFT->perform (complexData, complexData, false);
+            
+            for (int i = 0; i < 1024; i += 8) {
 
-            __m256 spectralMask = _mm256_set1_ps(0.5f * (1.0f/512.0f));
+                __m256 temp = _mm256_load_ps(&fftBuffer[i]);
+
+                __m256 squared = _mm256_mul_ps(temp, temp);
+
+                //Create a permutation of the magniutudes swapping imaginary and real numbers
+                __m256 swapped = _mm256_permute_ps(squared, _MM_SHUFFLE(2, 3, 0, 1));
+
+                __m256 combined = _mm256_add_ps(squared, swapped);
+
+                __m256 final = _mm256_sqrt_ps(combined);
+                //Create duplicate magniutdes so each imaginary and real value in fftbuffer are scaled the same
+                _mm256_store_ps(&magnitude[i], final);
+
+            }
+
+            
+            for (int i = 0; i < 1024; i++) {
+                if (calibrationCounter < 20) {
+                    noiseFloor[i] = magnitude[i];
+                }
+                else {
+                    //If the frequency is noise
+                    if (magnitude[i] < noiseFloor[i]) {
+                        noiseFloor[i] = (0.9f * noiseFloor[i - 1]) + (0.1f * magnitude[i]);
+                    }
+                    //If the frequency is signal
+                    else {
+                        noiseFloor[i] = (0.999f * noiseFloor[i - 1]) + (0.001f * magnitude[i]);
+                    }
+                }
+            }
+
+            __m256 normalization = _mm256_set1_ps(1.0f / 512.0f);
             //AVX2 process eight floats at a time
-            for (int i = 0; i < 1024; i += 4) {
+            for (int i = 0; i < 1024; i += 8) {
+                __m256 ones = _mm256_set1_ps(1.0f);
+
                 // Load 8 floats (4 complex numbers)
                 __m256 temp = _mm256_load_ps(&fftBuffer[i]);
 
-                // Multiply by mask
-                __m256 processed = _mm256_mul_ps(temp, spectralMask);
+                __m256 noise = _mm256_load_ps(&noiseFloor[i]);
+
+                __m256 mag = _mm256_load_ps(&magnitude[i]);
+
+                //Avoid dividing by zero
+                __m256 eps = _mm256_set1_ps(1e-7f);
+                
+                __m256 SNR = _mm256_div_ps(mag, _mm256_add_ps(noise, eps));
+                
+                __m256 SNRDenom = _mm256_add_ps(SNR, ones);
+
+                __m256 gain = _mm256_div_ps(SNR, SNRDenom);
+
+                __m256 combinedGain = _mm256_mul_ps(gain, normalization);
+
+                __m256 supression = _mm256_mul_ps(temp, combinedGain);
 
                 // Store back into fftBuffer
-                _mm256_store_ps(&fftBuffer[i], processed);
+                _mm256_store_ps(&fftBuffer[i], supression);
             }
 
             inverseFFT->perform(complexData, complexData, true);
+            for (int i = 0; i < 512; i++) {
+                fftBuffer[i * 2] *= windowTable[i];
+            }
         }
         count = 0;
+        calibrationCounter++;
     }
 }
 
