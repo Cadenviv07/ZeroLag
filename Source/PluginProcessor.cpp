@@ -260,8 +260,22 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             }
 
             inverseFFT->perform(complexData, complexData, true);
+            //Add the fading out audio of the fft buffer to the fading in audio of the enxt window
             for (int i = 0; i < 512; i++) {
                 fftBuffer[i * 2] *= windowTable[i];
+                olaBuffer[i] += fftBuffer[i * 2];
+            }
+            auto* channelData = buffer.getWritePointer(channel);
+            for (int i = 0; i < buffer.getNumSamples(); ++i) {
+                channelData[i] = olaBuffer[i];
+            }
+            //Reset window 
+            for (int i = 0; i < (1024 - 64); ++i) {
+                olaBuffer[i] = olaBuffer[i + 64];
+            }
+
+            for (int i = (1024 - 64); i < 1024; ++i) {
+                olaBuffer[i] = 0.0f;
             }
         }
         count = 0;

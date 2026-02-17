@@ -33,13 +33,16 @@ private:
     alignas(32) float fftBuffer[fftSize * 2];
 
     //Magnitude of the sounds produced
-    alignas(32) float magnitude[512];
+    alignas(32) float magnitude[1024];
+    alignas(32) float noiseFloor[1024];
+    alignas(32) float olaBuffer[1024]{ 0.0f };
 
     std::unique_ptr<juce::dsp::FFT> forwardFFT;
     std::unique_ptr<juce::dsp::FFT> inverseFFT;
 
     std::vector<float> windowTable;
 
+    int calibrationCounter = 0;
 
 public:
     //==============================================================================
