@@ -29,13 +29,15 @@ private:
 
     int count = 0;
 
+    int totalSamplesProcessed = 0;
+
     //Alignas 32 makes sure that the avx2 can find its location in memory easily and stops at the right spot
     alignas(32) float fftBuffer[fftSize * 2];
 
     //Magnitude of the sounds produced
-    alignas(32) float magnitude[1024];
-    alignas(32) float noiseFloor[1024];
-    alignas(32) float olaBuffer[1024]{ 0.0f };
+    alignas(32) juce::AudioBuffer<float> magnitude;
+    alignas(32) juce::AudioBuffer<float> noiseFloor;
+    alignas(32) juce::AudioBuffer<float> olaBuffer;
 
     std::unique_ptr<juce::dsp::FFT> forwardFFT;
     std::unique_ptr<juce::dsp::FFT> inverseFFT;

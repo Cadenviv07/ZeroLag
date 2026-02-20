@@ -102,6 +102,9 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
     circularBuffer.setSize(getTotalNumInputChannels(), fftSize);
+    olaBuffer.setSize(getTotalNumInputChannels(), fftSize*2);
+    magnitude.setSize(getTotalNumInputChannels(), fftSize * 2);
+    noiseFloor.setSize(getTotalNumInputChannels(), fftSize * 2);
     windowTable.assign(512, 0.0f);
     for (int n = 0; n < 512; ++n) {
         windowTable[n] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 511.0f));
@@ -140,20 +143,14 @@ bool ZeroLagAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 }
 #endif
 
-void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
+    auto totalNumInputChannels = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+        buffer.clear(i, 0, buffer.getNumSamples());
 
     // This is the place where you'd normally do the guts of your plugin's
     // audio processing...
@@ -164,12 +161,18 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     int startWritePos = writePointer;
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
     {
-        auto* channelData = buffer.getWritePointer (channel);
+        auto* channelData = buffer.getWritePointer(channel);
         int currentWritePos = startWritePos;
         // ..do something to the data...
         // i loops through the 64 samples while currentWritePos loops through the 512 frequencies in the ciruclar buffer
         for (int i = 0; i < buffer.getNumSamples(); i++) {
             circularBuffer.setSample(channel, currentWritePos, channelData[i]);
+
+            // PULL FROM OLA: Give the host the processed sample from the conveyor belt
+            channelData[i] = olaBuffer.getSample(channel, i);
+            // Clear used sample
+            olaBuffer.setSample(channel, i, 0.0f);
+
             currentWritePos++;
             currentWritePos &= (fftSize - 1);//Bitwise trick to reset it to zero once it reaches 512
         }
@@ -179,13 +182,12 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
     count += buffer.getNumSamples();
 
-   
-    if (count >= shiftSize && count > fftSize) {
+    while (count >= shiftSize && totalSamplesProcessed > fftSize) {
         for (int channel = 0; channel < totalNumInputChannels; ++channel) {
-            int fftPos = writePointer;
+            int fftPos = (writePointer - fftSize + fftSize) & (fftSize - 1);
             for (int sample = 0; sample < fftSize * 2; sample += 2) {
                 fftBuffer[sample] = circularBuffer.getSample(channel, fftPos);
-                fftBuffer[sample] *= windowTable[sample/ 2];
+                fftBuffer[sample] *= windowTable[sample / 2];
                 //Add an imaginary number for every real number sample
                 fftBuffer[sample + 1] = 0.0f;
                 fftPos += 1;
@@ -194,8 +196,10 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             //Finish with FFT data and copy it out to repeat for next channel
             auto* complexData = reinterpret_cast<juce::dsp::Complex<float>*>(fftBuffer);
 
-            forwardFFT->perform (complexData, complexData, false);
-            
+            forwardFFT->perform(complexData, complexData, false);
+
+            float* magData = magnitude.getWritePointer(channel);
+
             for (int i = 0; i < 1024; i += 8) {
 
                 __m256 temp = _mm256_load_ps(&fftBuffer[i]);
@@ -209,23 +213,24 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
                 __m256 final = _mm256_sqrt_ps(combined);
                 //Create duplicate magniutdes so each imaginary and real value in fftbuffer are scaled the same
-                _mm256_store_ps(&magnitude[i], final);
+                _mm256_store_ps(magData + i, final);
 
             }
 
-            
-            for (int i = 0; i < 1024; i++) {
+            float* nfData = noiseFloor.getWritePointer(channel);
+
+            for (int i = 1; i < 1024; i++) {
                 if (calibrationCounter < 20) {
-                    noiseFloor[i] = magnitude[i];
+                    nfData[i] = magData[i];
                 }
                 else {
                     //If the frequency is noise
-                    if (magnitude[i] < noiseFloor[i]) {
-                        noiseFloor[i] = (0.9f * noiseFloor[i - 1]) + (0.1f * magnitude[i]);
+                    if (magData[i] < nfData[i]) {
+                        nfData[i] = (0.9f * nfData[i - 1] + (0.1f * magData[i]));
                     }
                     //If the frequency is signal
                     else {
-                        noiseFloor[i] = (0.999f * noiseFloor[i - 1]) + (0.001f * magnitude[i]);
+                        nfData[i] = (0.999f * nfData[i - 1] + (0.001f * magData[i]));
                     }
                 }
             }
@@ -238,15 +243,15 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                 // Load 8 floats (4 complex numbers)
                 __m256 temp = _mm256_load_ps(&fftBuffer[i]);
 
-                __m256 noise = _mm256_load_ps(&noiseFloor[i]);
+                __m256 noise = _mm256_load_ps(nfData + i);
 
-                __m256 mag = _mm256_load_ps(&magnitude[i]);
+                __m256 mag = _mm256_load_ps(magData + i);
 
                 //Avoid dividing by zero
                 __m256 eps = _mm256_set1_ps(1e-7f);
-                
+
                 __m256 SNR = _mm256_div_ps(mag, _mm256_add_ps(noise, eps));
-                
+
                 __m256 SNRDenom = _mm256_add_ps(SNR, ones);
 
                 __m256 gain = _mm256_div_ps(SNR, SNRDenom);
@@ -260,25 +265,24 @@ void ZeroLagAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             }
 
             inverseFFT->perform(complexData, complexData, true);
+
             //Add the fading out audio of the fft buffer to the fading in audio of the enxt window
             for (int i = 0; i < 512; i++) {
-                fftBuffer[i * 2] *= windowTable[i];
-                olaBuffer[i] += fftBuffer[i * 2];
-            }
-            auto* channelData = buffer.getWritePointer(channel);
-            for (int i = 0; i < buffer.getNumSamples(); ++i) {
-                channelData[i] = olaBuffer[i];
-            }
-            //Reset window 
-            for (int i = 0; i < (1024 - 64); ++i) {
-                olaBuffer[i] = olaBuffer[i + 64];
-            }
-
-            for (int i = (1024 - 64); i < 1024; ++i) {
-                olaBuffer[i] = 0.0f;
+                float processedSample = fftBuffer[i * 2] * windowTable[i];
+                olaBuffer.setSample(channel, i, olaBuffer.getSample(channel, i) + processedSample);
             }
         }
-        count = 0;
+
+        // Shift OLA buffer by shiftSize (64)
+        for (int ch = 0; ch < totalNumInputChannels; ++ch) {
+            for (int i = 0; i < (fftSize * 2) - shiftSize; ++i) {
+                olaBuffer.setSample(ch, i, olaBuffer.getSample(ch, i + shiftSize));
+            }
+            olaBuffer.clear(ch, (fftSize * 2) - shiftSize, shiftSize);
+        }
+
+        count -= shiftSize;
+        totalSamplesProcessed += shiftSize;
         calibrationCounter++;
     }
 }
