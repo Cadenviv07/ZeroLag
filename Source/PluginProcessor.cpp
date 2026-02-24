@@ -105,6 +105,16 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     olaBuffer.setSize(getTotalNumInputChannels(), fftSize*2);
     magnitude.setSize(getTotalNumInputChannels(), fftSize * 2);
     noiseFloor.setSize(getTotalNumInputChannels(), fftSize * 2);
+    olaBuffer.clear();
+    noiseFloor.clear();
+    magnitude.clear();
+    circularBuffer.clear();
+
+    writePointer = 0;
+    count = 0;
+    calibrationCounter = 0;
+    totalSamplesProcessed = 0;
+
     windowTable.assign(512, 0.0f);
     for (int n = 0; n < 512; ++n) {
         windowTable[n] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 511.0f));
@@ -182,7 +192,7 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     count += buffer.getNumSamples();
 
-    while (count >= shiftSize && totalSamplesProcessed > fftSize) {
+    while (count >= shiftSize) {
         for (int channel = 0; channel < totalNumInputChannels; ++channel) {
             int fftPos = (writePointer - fftSize + fftSize) & (fftSize - 1);
             for (int sample = 0; sample < fftSize * 2; sample += 2) {
@@ -234,8 +244,8 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                     }
                 }
             }
-
-            __m256 normalization = _mm256_set1_ps(1.0f / 512.0f);
+            // The hann window causes the vector to be scaled three times more
+            __m256 normalization = _mm256_set1_ps(1.0f / 1536.0f);
             //AVX2 process eight floats at a time
             for (int i = 0; i < 1024; i += 8) {
                 __m256 ones = _mm256_set1_ps(1.0f);
@@ -263,13 +273,21 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 // Store back into fftBuffer
                 _mm256_store_ps(&fftBuffer[i], supression);
             }
-
+            if (channel == 0) {
+                DBG("FFT Bin 10: " << fftBuffer[10]);
+            }
+            if (channel == 0) {
+                DBG("Noise Floor [10]: " << noiseFloor.getSample(0, 10));
+            }
             inverseFFT->perform(complexData, complexData, true);
 
             //Add the fading out audio of the fft buffer to the fading in audio of the enxt window
             for (int i = 0; i < 512; i++) {
                 float processedSample = fftBuffer[i * 2] * windowTable[i];
                 olaBuffer.setSample(channel, i, olaBuffer.getSample(channel, i) + processedSample);
+            }
+            if (channel == 0) {
+                DBG("OLA Out: " << olaBuffer.getSample(0, 50));
             }
         }
 
