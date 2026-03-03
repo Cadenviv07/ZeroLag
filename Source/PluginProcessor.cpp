@@ -101,7 +101,7 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 {
     // Use this method as the place to do any pre-playback
     // initialisation that you need..
-    circularBuffer.setSize(getTotalNumInputChannels(), fftSize);
+    circularBuffer.setSize(getTotalNumInputChannels(), fftSize*2);
     olaBuffer.setSize(getTotalNumInputChannels(), fftSize*2);
     magnitude.setSize(getTotalNumInputChannels(), fftSize * 2);
     noiseFloor.setSize(getTotalNumInputChannels(), fftSize * 2);
@@ -117,7 +117,7 @@ void ZeroLagAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     windowTable.assign(512, 0.0f);
     for (int n = 0; n < 512; ++n) {
-        windowTable[n] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 511.0f));
+        windowTable[n] = (1/1024.0f)* 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * n / 512.0f));
     }
 }
 
@@ -178,106 +178,105 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         for (int i = 0; i < buffer.getNumSamples(); i++) {
             circularBuffer.setSample(channel, currentWritePos, channelData[i]);
 
-            // PULL FROM OLA: Give the host the processed sample from the conveyor belt
-            channelData[i] = olaBuffer.getSample(channel, i);
-            // Clear used sample
-            olaBuffer.setSample(channel, i, 0.0f);
-
             currentWritePos++;
-            currentWritePos &= (fftSize - 1);//Bitwise trick to reset it to zero once it reaches 512
+            currentWritePos &= (1024 - 1);//Bitwise trick to reset it to zero once it reaches 512
         }
     }
     //Update writePointer for next function call
-    writePointer = (startWritePos + buffer.getNumSamples()) & (fftSize - 1);
+    writePointer = (startWritePos + buffer.getNumSamples()) & (1024 - 1);
 
     count += buffer.getNumSamples();
 
+    int outputWriteIndex = 0;
     while (count >= shiftSize) {
         for (int channel = 0; channel < totalNumInputChannels; ++channel) {
-            int fftPos = (writePointer - fftSize + fftSize) & (fftSize - 1);
+            int fftPos = (writePointer - count + shiftSize - fftSize + 1024) & (1024 - 1);
             for (int sample = 0; sample < fftSize * 2; sample += 2) {
                 fftBuffer[sample] = circularBuffer.getSample(channel, fftPos);
                 fftBuffer[sample] *= windowTable[sample / 2];
                 //Add an imaginary number for every real number sample
                 fftBuffer[sample + 1] = 0.0f;
                 fftPos += 1;
-                fftPos &= (fftSize - 1);
+                fftPos &= ((fftSize*2) - 1);
             }
             //Finish with FFT data and copy it out to repeat for next channel
             auto* complexData = reinterpret_cast<juce::dsp::Complex<float>*>(fftBuffer);
 
             forwardFFT->perform(complexData, complexData, false);
 
-            float* magData = magnitude.getWritePointer(channel);
+            //float* magData = magnitude.getWritePointer(channel);
 
-            for (int i = 0; i < 1024; i += 8) {
+            ////for (int i = 0; i < 1024; i += 8) {
 
-                __m256 temp = _mm256_load_ps(&fftBuffer[i]);
+            ////    __m256 temp = _mm256_load_ps(&fftBuffer[i]);
 
-                __m256 squared = _mm256_mul_ps(temp, temp);
+            ////    __m256 squared = _mm256_mul_ps(temp, temp);
 
-                //Create a permutation of the magniutudes swapping imaginary and real numbers
-                __m256 swapped = _mm256_permute_ps(squared, _MM_SHUFFLE(2, 3, 0, 1));
+            ////    //Create a permutation of the magniutudes swapping imaginary and real numbers
+            ////    __m256 swapped = _mm256_permute_ps(squared, _MM_SHUFFLE(2, 3, 0, 1));
 
-                __m256 combined = _mm256_add_ps(squared, swapped);
+            ////    __m256 combined = _mm256_add_ps(squared, swapped);
 
-                __m256 final = _mm256_sqrt_ps(combined);
-                //Create duplicate magniutdes so each imaginary and real value in fftbuffer are scaled the same
-                _mm256_store_ps(magData + i, final);
+            ////    __m256 final = _mm256_sqrt_ps(combined);
+            ////    //Create duplicate magniutdes so each imaginary and real value in fftbuffer are scaled the same
+            ////    _mm256_store_ps(magData + i, final);
 
-            }
+            ////}
 
-            float* nfData = noiseFloor.getWritePointer(channel);
+            //float* nfData = noiseFloor.getWritePointer(channel);
 
-            for (int i = 1; i < 1024; i++) {
-                if (calibrationCounter < 20) {
-                    nfData[i] = magData[i];
-                }
-                else {
-                    //If the frequency is noise
-                    if (magData[i] < nfData[i]) {
-                        nfData[i] = (0.9f * nfData[i - 1] + (0.1f * magData[i]));
-                    }
-                    //If the frequency is signal
-                    else {
-                        nfData[i] = (0.999f * nfData[i - 1] + (0.001f * magData[i]));
-                    }
-                }
-            }
+            //for (int i = 1; i < 1024; i++) {
+            //    if (calibrationCounter < 20) {
+            //        nfData[i] = magData[i];
+            //    }
+            //    else {
+            //        //If the frequency is noise
+            //        if (magData[i] < nfData[i]) {
+            //            nfData[i] = (0.9f * nfData[i] + (0.1f * magData[i]));
+            //        }
+            //        //If the frequency is signal
+            //        else {
+            //            nfData[i] = (0.999f * nfData[i] + (0.001f * magData[i]));
+            //        }
+            //    }
+            //}
             // The hann window causes the vector to be scaled three times more
-            __m256 normalization = _mm256_set1_ps(1.0f / 1536.0f);
+            //__m256 normalization = _mm256_set1_ps(1.0f / 1536.0f);
             //AVX2 process eight floats at a time
-            for (int i = 0; i < 1024; i += 8) {
-                __m256 ones = _mm256_set1_ps(1.0f);
+            //for (int i = 0; i < 1024; i += 8) {
+            //    __m256 ones = _mm256_set1_ps(1.0f);
 
-                // Load 8 floats (4 complex numbers)
-                __m256 temp = _mm256_load_ps(&fftBuffer[i]);
+            //    // Load 8 floats (4 complex numbers)
+            //    __m256 temp = _mm256_load_ps(&fftBuffer[i]);
 
-                __m256 noise = _mm256_load_ps(nfData + i);
+            //    __m256 noise = _mm256_load_ps(nfData + i);
 
-                __m256 mag = _mm256_load_ps(magData + i);
+            //    __m256 mag = _mm256_load_ps(magData + i);
 
-                //Avoid dividing by zero
-                __m256 eps = _mm256_set1_ps(1e-7f);
+            //    //Avoid dividing by zero
+            //    __m256 eps = _mm256_set1_ps(1e-7f);
 
-                __m256 SNR = _mm256_div_ps(mag, _mm256_add_ps(noise, eps));
+            //    __m256 SNR = _mm256_div_ps(mag, _mm256_add_ps(noise, eps));
 
-                __m256 SNRDenom = _mm256_add_ps(SNR, ones);
+            //    __m256 SNRDenom = _mm256_add_ps(SNR, ones);
 
-                __m256 gain = _mm256_div_ps(SNR, SNRDenom);
+            //    __m256 gain = _mm256_div_ps(SNR, SNRDenom);
 
-                __m256 combinedGain = _mm256_mul_ps(gain, normalization);
+            //    //__m256 combinedGain = _mm256_mul_ps(gain, normalization);
 
-                __m256 supression = _mm256_mul_ps(temp, combinedGain);
+            //    __m256 supression = _mm256_mul_ps(temp, gain);
 
-                // Store back into fftBuffer
-                _mm256_store_ps(&fftBuffer[i], supression);
-            }
+            //    // Store back into fftBuffer
+            //    _mm256_store_ps(&fftBuffer[i], supression);
+            //}
             if (channel == 0) {
                 DBG("FFT Bin 10: " << fftBuffer[10]);
             }
             if (channel == 0) {
                 DBG("Noise Floor [10]: " << noiseFloor.getSample(0, 10));
+            }
+            if (channel == 0) {
+                DBG("Magnitude[10]: " << magnitude.getSample(0, 10));
             }
             inverseFFT->perform(complexData, complexData, true);
 
@@ -285,6 +284,13 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (int i = 0; i < 512; i++) {
                 float processedSample = fftBuffer[i * 2] * windowTable[i];
                 olaBuffer.setSample(channel, i, olaBuffer.getSample(channel, i) + processedSample);
+            }
+            for (int i = 0; i < 64; ++i) {
+                auto* channelData = buffer.getWritePointer(channel);
+                channelData[i + outputWriteIndex] = olaBuffer.getSample(channel, i);
+                if (outputWriteIndex + i > buffer.getNumSamples()) {
+                    outputWriteIndex = 0;
+                }
             }
             if (channel == 0) {
                 DBG("OLA Out: " << olaBuffer.getSample(0, 50));
@@ -298,7 +304,7 @@ void ZeroLagAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             }
             olaBuffer.clear(ch, (fftSize * 2) - shiftSize, shiftSize);
         }
-
+        outputWriteIndex += 64;
         count -= shiftSize;
         totalSamplesProcessed += shiftSize;
         calibrationCounter++;
